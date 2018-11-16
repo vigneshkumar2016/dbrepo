@@ -1,0 +1,56 @@
+Mysql DR Replication Activity:
+
+1. Take the backup from Master (Place the Script for backup in sh file and run it as nohup &):
+mysqldump -u $user -p$pwd --default-character-set=utf8 --max_allowed_packet=1G --databases $db1 $db2 > $bkppath/$filename
+gzip $bkppath/$filename
+
+2. Zip the raw data dump file taken:
+gzip filename filename.gz
+
+3. Transfer the file from Master server to sec server:
+scp filename.gz user@drdbserver:/backup/dump/
+
+4. Uncompress from the secondary server end:
+gunzip filename.gz
+
+5. If there is already a DR setup build between Master & Client
+	a. Note the Position of the bin log before taking backup from master
+		i). Login to DB and run 'SHOW MASTER STATUS;' command, Note the Log Position and Bin File which will be used for restarting the slave.
+	b. Keep a track of the mysql-bin-log and its directory for file size growth
+		ii). using command ll -ltrah ( Latest File Size Recently Written to disk)
+
+6. Note the path for the data path for which the datbase needs to be restore (/u01/mysql/data/, /u01/mysql/data/log, /u01/mysql/logs)
+
+7. Login to the secondary server drop the database 'drop database $databasename;' (if you wish, you can take a backup of this database before dropping)_
+	a. Backup involves cmd line 'mysql -u $user -p $pwd --default-character-set=utf8 --max_allowed_packet=1G --databases $db1 $db2
+	
+	b. Once the backup is ready you are now set to 'drop database $databasename;'
+
+8. Now start restoring the uncompressed file which is raw sql dump.
+	a. mysql -u $user -p$pwd --default-character-set=utf8 --max_allowed_packet=1G -D$databasename <$backupfilename
+	
+9. While the restore is on progress, monitor the log space and binary log space keeps growing untill it grows max, it gets split into multiple files.
+	a. check if the log space is getting acumulated and near to your disk capacity.
+	b. if yes, purge the binary logs to latest file.
+	c. Run the mysql in command line to get the binary log file 'mysql -u $user -p $pwd -e "show binary logs;"'
+	d. Get the file name of recent log file name and purge using command 'mysql -u $user -p $pwd -e "purge binary logs to $recent_bin_log_file"'
+    e. Once purged your disk space will be saved.
+
+10. Run the following command on restored instance.
+	 a. mysql -u $user -p$pwd -e "use $db1"
+	 b. mysql -u $user -p$pwd -e "show tables" ( Compare with that of the master instance)
+	 c. Once verified completely.
+	 d. Check the slave status using 'mysql -u $user -p $pwd -e "show slave status\G;"'
+	 e. If running stop the slave services in mysql using 'mysql -u $user -p$pwd -e "stop slave;"
+	 f. Once Stopped the slave services, reset the slave using 'mysql -u $user -p$pwd -e "reset slave;"
+	 g. Once this is done, change the master bin log and map the position number to initiate the replication and allow relay logs to communicate to secondary server.
+	 h. run this command to perform above 'mysql -u $user -p$pwd -e "change master to master_host='$master_ip',master_user='$rep_user',master_password='$rep_pwd',master_log_file='$bin_log_file_name',master_log_pos=$position_number"';
+	 i. Once the above is performed run the command to restart mysql services 'service mysql restart'
+	 
+11. Once above set is completed you should leave it some time for the sync to happen, then you can verify using below commands
+	 a. 'mysql -u $user -p$pwd -e "show slave status\G;" | grep Seconds_behind_Master'
+	 b.  you should see the time in seconds getting reversed untill its set to 0.
+	 c. When its 0 you can call the DR is in intact with the master server.
+
+	 
+		

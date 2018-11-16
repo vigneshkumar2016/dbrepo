@@ -1,0 +1,74 @@
+#Auto Deployment of Mysql Database
+
+user=root
+password : 'YourSecretPassword'
+
+ALTER USER USER() IDENTIFIED BY 'YourSecretPassword';
+
+#!/bin/bash
+
+# ***************************************************************************
+# Script to autodeploy MySQL on Machine
+# Authour : Vignesh & Nadesh
+# version : 1.0
+# Compatible : Centos 7
+# Script : Shell Script
+# User : root
+# Database : MySQL 5.7 Community Edition
+# ****************************************************************************
+
+clear
+echo "Updating the yum package repository to latest version"
+yum update
+echo "Yum update complete"
+
+echo "Creating the local directory for Mysql rpm"
+mkdir /local_repo
+chmod 754 /local_repo
+cd /local_repo
+
+echo "Getting the rpm package for the mysql from yum"
+wget http://repo.mysql.com/mysql57-community-release-el7-7.noarch.rpm
+echo "installing the rpm for mysql installation from the repo"
+rpm -ivh mysql57-community-release-el7-7.noarch.rpm
+
+echo "updating the yum repository for getting the mysql latest build"
+yum update
+echo "yum update is completed"
+
+echo "Starting the installatio for the mysql"
+yum install mysql-server
+echo "installation of mysql-server has been completed"
+
+echo "Enabling the Mysql daemon from the systemctl"
+systemctl enable mysqld.service
+echo "starting the Mysql daemon from the systemctl"
+systemctl start mysqld.service
+
+echo "Generating the mysql temporary password for the installed instance"
+tmp_pwd=`grep 'temporary password' /var/log/mysqld.log`
+echo "Temporary Password is : $tmp_pwd"
+
+echo "Starting the mysql secure installation"
+mysql_secure_installation
+
+
+******************************************************************************************
+
+Engine Server Size details:
+
+SELECT  ENGINE,
+        ROUND(SUM(data_length) /1024/1024, 1) AS "Data MB",
+        ROUND(SUM(index_length)/1024/1024, 1) AS "Index MB",
+        ROUND(SUM(data_length + index_length)/1024/1024, 1) AS "Total MB",
+        COUNT(*) "Num Tables"
+    FROM  INFORMATION_SCHEMA.TABLES
+    WHERE  table_schema not in ("information_schema", "PERFORMANCE_SCHEMA", "SYS_SCHEMA", "ndbinfo")
+    GROUP BY  ENGINE;
+	
+DB Name with Size:
+
+select table_schema "db name", sum(data_length+index_length)/1024/1024 "db size in mb" from information_schema.tables group by table_schema;
+
+
+
