@@ -1,0 +1,68 @@
+=============================================================================================
+Upgrading the PostgreSQL stable 9.6 Version build
+=============================================================================================
+
+#Adding the URL to download the direcet version RPM
+
+wget https://yum.postgresql.org/9.6/redhat/rhel-7.4-x86_64/pgdg-centos96-9.6-3.noarch.rpm
+rpm -i pgdg-centos96-9.6-3.noarch.rpm
+
+# Installing the contribution package through YUM repository
+
+yum install postgresql96-server postgresql96-contrib
+/usr/pgsql-9.6/bin/postgresql96-setup initdb
+
+# Data Export using pg_ctl
+
+mv /usr/bin/pg_ctl{,-orig}
+echo '#!/bin/bash' > /usr/bin/pg_ctl
+echo '"$0"-orig "${@/unix_socket_directory/unix_socket_directories}"' >> /usr/bin/pg_ctl
+chmod +x /usr/bin/pg_ctl
+
+==============
+Start importing/upgrading data to new server
+==============
+
+systemctl stop postgresql
+# At this point both servers are stoped
+
+# As Postgres user
+su postgres
+cd ~
+/usr/pgsql-9.6/bin/pg_upgrade -v -b /usr/bin/ -B /usr/pgsql-9.6/bin/ -d /var/lib/pgsql/data/ -D /var/lib/pgsql/9.6/data/
+exit
+
+# Back to root user
+# Rollback pg_ctl
+mv -f /usr/bin/pg_ctl{-orig,}
+
+#### APPLY OLD postgresql config params to postgresql-9.6 (pg_hba.conf, postgresql.conf) (manually), maybe use pgtune for postgresql.conf...
+
+==============
+START NEW SERVER AND DISABLE THE OLD
+==============
+
+systemctl start postgresql-9.6
+systemctl enable postgresql-9.6
+systemctl disable postgresql
+
+# temporary
+ln -s /usr/pgsql-9.6/bin/psql /usr/bin/psql --force
+ln -s /usr/pgsql-9.6/bin/pg_dump /usr/bin/pg_dump --force
+
+# Postgres user
+su postgres
+cd ~
+./analyze_new_cluster.sh
+exit
+
+# back as root
+# remove old postgresql
+yum remove postgresql
+
+# Export new path
+echo 'export PATH=$PATH:/usr/pgsql-9.6/bin' >> /etc/bashrc
+
+exit, SSH back to host and check if new path is ok for postgres commands
+
+Finally decide if you want to remove the old postgres cluster (data folder)
