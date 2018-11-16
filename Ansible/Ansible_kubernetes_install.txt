@@ -1,0 +1,210 @@
+------------------------------------------------------------------
+# Ansible COnfiguration #
+------------------------------------------------------------------
+
+# Ansible Commands - Ansible Host commands
+
+
+#Displays the Inventory List which has been defined in /etc/ansible/hosts
+ansible-inventory --list
+
+#Mapping the configuration file to the ansible-inventory
+ansible-config -c /etc/ansible/ansible.cfg
+
+#Ansible Connection Statistics Report
+ansible -m service -a 'name=<service_name> state=started' --check all
+
+#Ansible Command to get the details of inventory
+ansible -m command -a "df -h" all
+
+#Display id of servers
+ansible all -m shell -a id
+
+-----------------------------------------------------------------------
+# Docker Configuration #
+-----------------------------------------------------------------------
+
+docker run -d dockerswarm/swarm:master join --advertise=192.168.1.105:2375 consul://192.168.1.103:8500
+
+-----------------------------------------------------------------------
+# Kubernetes Cluster Installation #
+-----------------------------------------------------------------------
+sudo yum update -y
+
+sudo yum install -y docker
+
+sudo systemctl enable docker && sudo systemctl start docker
+
+sudo docker version
+
+sudo bash -c 'cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+EOF'
+
+sudo setenforce 0
+
+sudo yum install -y kubelet kubeadm kubectl
+
+sudo systemctl enable kubelet && sudo systemctl start kubelet
+
+sudo yum install -y kubelet kubeadm kubectl
+
+sudo bash -c 'cat <<EOF >  /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+EOF'
+
+sudo sysctl --system
+
+sudo systemctl disable firewalld
+
+sudo systemctl stop firewalld
+
+sudo systemctl status firewalld
+
+sudo kubeadm init --pod-network-cidr <IP_Address>/<16>
+
+#At Master Node
+ mkdir -p $HOME/.kube
+ sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+ sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/k8s-manifests/kube-flannel-rbac.yml
+
+kubectl get pods --all-namespaces
+
+sudo kubeadm join --token a2dc82.7e936a7ba007f01e 10.0.0.7:6443 --discovery-token-ca-cert-hash sha256:30aca9f9c04f829a13c925224b34c47df0a784e9ba94e132a983658a70ee2914
+
+kubectl get nodes
+
+-----------------------------------------------------------------------------
+# Kubernetes Cluster Configuration #
+-----------------------------------------------------------------------------
+
+hostnamectl set-hostname 'kubernetes_master'
+
+exec bash
+
+setenforce 0
+
+sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/sysconfig/selinux
+
+--FireWall Rules if Enabled & ignore if disabled already--
+
+firewall-cmd --permanent --add-port=6443/tcp
+
+firewall-cmd --permanent --add-port=2379-2380/tcp
+
+firewall-cmd --permanent --add-port=10250/tcp
+
+firewall-cmd --permanent --add-port=10251/tcp
+
+firewall-cmd --permanent --add-port=10252/tcp
+
+firewall-cmd --permanent --add-port=10255/tcp
+
+firewall-cmd --reload
+
+modprobe br_netfilter
+
+echo '1' > /proc/sys/net/bridge/bridge-nf-call-iptables
+
+-- Add in the master and worker nodes -- # /etc/hosts
+
+192.168.1.30 kubernetes_master
+192.168.1.40 kubernetes_node1
+192.168.1.50 kubernetes_node2
+
+-- Configure Kubernetes Repository --
+
+cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+> [kubernetes]
+> name=Kubernetes
+> baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+> enabled=1
+> gpgcheck=1
+> repo_gpgcheck=1
+> gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
+>         https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+> EOF
+
+yum install kubeadm docker -y
+
+systemctl restart docker && systemctl enable docker
+
+systemctl  restart kubelet && systemctl enable kubelet
+
+systemctl  restart kubelet && systemctl enable kubelet
+
+kubeadm init
+
+-- Run this command in the Master node --
+
+mkdir -p $HOME/.kube
+
+cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+
+chown $(id -u):$(id -g) $HOME/.kube/config
+
+kubectl get nodes
+
+-- Run the below commands to deploy the network to cluster --
+
+export kubever=$(kubectl version | base64 | tr -d '\n')
+
+kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$kubever"
+
+serviceaccount "weave-net" created
+
+clusterrole "weave-net" created
+
+clusterrolebinding "weave-net" created
+
+daemonset "weave-net" created
+
+kubectl get nodes
+
+kubectl  get pods  --all-namespaces
+
+# Perform the below on child Nodes
+
+-- Linux Security Settings --
+
+sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/sysconfig/selinux
+
+firewall-cmd --permanent --add-port=10250/tcp
+
+firewall-cmd --permanent --add-port=10255/tcp
+
+firewall-cmd --permanent --add-port=30000-32767/tcp
+
+firewall-cmd --permanent --add-port=6783/tcp
+
+firewall-cmd  --reload
+
+echo '1' > /proc/sys/net/bridge/bridge-nf-call-iptables
+
+-- Node Packages Installation --
+
+yum  install kubeadm docker -y
+
+yum  install kubeadm docker -y
+
+systemctl restart docker && systemctl enable docker
+
+systemctl restart docker && systemctl enable docker
+
+[root@worker-node1 ~]# kubeadm join --token a3bd48.1bc42347c3b35851 192.168.1.30:6443
+
+[root@worker-node2 ~]# kubeadm join --token a3bd48.1bc42347c3b35851 192.168.1.30:6443
+
+kubectl get node
+

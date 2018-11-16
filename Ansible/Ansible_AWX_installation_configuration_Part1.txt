@@ -1,0 +1,232 @@
+---------------------------------------------------------------------------------------
+# Ansibe AWX Installation and Configuration Step by Step  #
+---------------------------------------------------------------------------------------
+
+[root@awx ~]# sestatus
+SELinux status:                 enabled
+SELinuxfs mount:                /sys/fs/selinux
+SELinux root directory:         /etc/selinux
+Loaded policy name:             targeted
+Current mode:                   permissive
+Mode from config file:          permissive
+Policy MLS status:              enabled
+Policy deny_unknown status:     allowed
+Max kernel policy version:      28
+[root@awx ~]#
+
+---Add the host entries in
+
+/etc/hosts
+[root@awx ~]# cat /etc/hosts
+192.168.1.25    awx.sunil.cc awx
+192.168.1.21    client1.sunil.cc client1
+192.168.1.22    client2.sunil.cc client2
+[root@awx ~]#
+
+---Add the firewall rules
+
+[root@awx ~]# systemctl enable firewalld
+Created symlink from /etc/systemd/system/dbus-org.fedoraproject.FirewallD1.service to /usr/lib/systemd/system/firewalld.service.
+Created symlink from /etc/systemd/system/multi-user.target.wants/firewalld.service to /usr/lib/systemd/system/firewalld.service.
+[root@awx ~]# systemctl start firewalld
+[root@awx ~]# firewall-cmd --add-service=http --permanent;firewall-cmd --add-service=https --permanent
+success
+success
+[root@awx ~]# systemctl restart firewalld
+[root@awx ~]#
+
+---Enable CentOS EPEL repository.
+
+[root@awx ~]# yum install -y epel-release
+We need postgresql 9.6 for AWX installation.
+
+---Enable postgreSQL repo.
+
+[root@awx ~]# yum install -y https://download.postgresql.org/pub/repos/yum/9.6/redhat/rhel-7-x86_64/pgdg-centos96-9.6-3.noarch.rpm
+---Installing postgreSQL.
+
+[root@awx ~]# yum install postgresql96-server -y
+---Installing the other necessary rpms.
+
+[root@awx ~]# yum install -y rabbitmq-server wget memcached nginx ansible
+---Installing Ansible AWX
+Adding the AWX repo.
+
+[root@awx ~]# wget -O /etc/yum.repos.d/awx-rpm.repo https://copr.fedorainfracloud.org/coprs/mrmeee/awx/repo/epel-7/mrmeee-awx-epel-7.repo
+Installing the rpm
+
+[root@awx ~]# yum install -y awx
+Intializing the database
+
+[root@awx ~]# /usr/pgsql-9.6/bin/postgresql96-setup initdb
+Initializing database ... OK
+
+[root@awx ~]#
+Starting the Rabbitmq Service
+
+[root@awx ~]# systemctl start rabbitmq-server
+[root@awx ~]# systemctl enable rabbitmq-server
+Created symlink from /etc/systemd/system/multi-user.target.wants/rabbitmq-server.service to /usr/lib/systemd/system/rabbitmq-server.service.
+[root@awx ~]#
+Starting PostgreSQL Service
+
+[root@awx ~]# systemctl enable postgresql-9.6
+Created symlink from /etc/systemd/system/multi-user.target.wants/postgresql-9.6.service to /usr/lib/systemd/system/postgresql-9.6.service.
+[root@awx ~]# systemctl start postgresql-9.6
+Starting Memcached Service
+
+[root@awx ~]# systemctl enable memcached
+Created symlink from /etc/systemd/system/multi-user.target.wants/memcached.service to /usr/lib/systemd/system/memcached.service.
+[root@awx ~]# systemctl start memcached
+Creating Postgres user
+
+[root@awx ~]# sudo -u postgres createuser -S awx
+could not change directory to "/root": Permission denied
+[root@awx ~]#
+ignore the error
+
+Creating the database
+
+[root@awx ~]# sudo -u postgres createdb -O awx awx
+could not change directory to "/root": Permission denied
+[root@awx ~]#
+ignore the error
+
+Importing the data into Database
+
+[root@awx ~]# sudo -u awx /opt/awx/bin/awx-manage migrate
+Initializing the configuration for AWX
+
+[root@awx ~]# echo "from django.contrib.auth.models import User; User.objects.create_superuser('admin', 'root@localhost', 'password')" | sudo -u awx /opt/awx/bin/awx-manage shell
+[root@awx ~]# sudo -u awx /opt/awx/bin/awx-manage create_preload_data
+Default organization added.
+Demo Credential, Inventory, and Job Template added.
+[root@awx ~]# sudo -u awx /opt/awx/bin/awx-manage provision_instance --hostname=$(hostname)
+Successfully registered instance awx.sunil.cc
+(changed: True)
+[root@awx ~]# sudo -u awx /opt/awx/bin/awx-manage register_queue --queuename=tower --hostnames=$(hostname)
+Creating instance group tower
+Added instance awx.sunil.cc to tower
+(changed: True)
+[root@awx ~]#
+Configure Nginx
+Take the backup of nginx.conf
+
+[root@awx ~]# cd /etc/nginx/
+[root@awx nginx]# pwd
+/etc/nginx
+[root@awx nginx]# cp nginx.conf nginx.conf.bkp
+Replace the nginx conf file
+
+[root@awx nginx]# wget -O /etc/nginx/nginx.conf https://raw.githubusercontent.com/sunilsankar/awx-build/master/nginx.conf
+Enable and start nginx service
+
+[root@awx ~]# systemctl start nginx
+[root@awx ~]# systemctl enable nginx
+Start the awx services
+
+[root@awx ~]# systemctl start awx-cbreceiver
+[root@awx ~]# systemctl start awx-celery-beat
+[root@awx ~]# systemctl start awx-celery-worker
+[root@awx ~]# systemctl start awx-channels-worker
+[root@awx ~]# systemctl start awx-daphne
+[root@awx ~]# systemctl start awx-web
+Make sure the service is started during restart
+
+[root@awx ~]# systemctl enable awx-cbreceiver
+Created symlink from /etc/systemd/system/multi-user.target.wants/awx-cbreceiver.service to /usr/lib/systemd/system/awx-cbreceiver.service.
+[root@awx ~]# systemctl enable awx-celery-beat
+Created symlink from /etc/systemd/system/multi-user.target.wants/awx-celery-beat.service to /usr/lib/systemd/system/awx-celery-beat.service.
+[root@awx ~]# systemctl enable awx-celery-worker
+Created symlink from /etc/systemd/system/multi-user.target.wants/awx-celery-worker.service to /usr/lib/systemd/system/awx-celery-worker.service.
+[root@awx ~]# systemctl enable awx-channels-worker
+Created symlink from /etc/systemd/system/multi-user.target.wants/awx-channels-worker.service to /usr/lib/systemd/system/awx-channels-worker.service.
+[root@awx ~]# systemctl enable awx-daphne
+Created symlink from /etc/systemd/system/multi-user.target.wants/awx-daphne.service to /usr/lib/systemd/system/awx-daphne.service.
+[root@awx ~]# systemctl enable awx-web
+Created symlink from /etc/systemd/system/multi-user.target.wants/awx-web.service to /usr/lib/systemd/system/awx-web.service.
+[root@awx ~]#
+Configure passwordless login from AWX server
+Create a user on all the 3 hosts.
+
+Here in this tutorial, I am creating a user ansible on all the 3 servers.
+
+[root@awx ~]# useradd ansible
+[root@client1 ~]# useradd ansible
+[root@clien2 ~]# useradd ansible
+Generating ssh key in awx server
+
+[root@awx nginx]# su - ansible
+[ansible@awx ~]$ ssh-keygen
+Generating public/private rsa key pair.
+Enter file in which to save the key (/home/ansible/.ssh/id_rsa):
+Created directory '/home/ansible/.ssh'.
+Enter passphrase (empty for no passphrase):
+Enter same passphrase again:
+Your identification has been saved in /home/ansible/.ssh/id_rsa.
+Your public key has been saved in /home/ansible/.ssh/id_rsa.pub.
+The key fingerprint is:
+SHA256:RW/dhTsxcyGicleRI0LpLm+LyhAVinm0xktapodc8gY ansible@awx.sunil.cc
+The key's randomart image is:
++---[RSA 2048]----+
+|   . .  ..o. +ooo|
+|  = o .  +.oo+*.o|
+| E @ . ..oo.+ o*.|
+|. # o   oo..  o  |
+| = *    S      . |
+|  o .  . .       |
+|   .    o        |
+|    o   .o       |
+|     o.....      |
++----[SHA256]-----+
+[ansible@awx ~]$
+Adding the sudoers entry on all 3 servers as a last entry to the file
+
+[root@awx nginx]# visudo
+ansible ALL=(ALL) NOPASSWD: ALL
+Copy the content of id_rsa.pub to authorized_keys on all the 3 servers
+
+[ansible@awx .ssh]$ cat id_rsa.pub
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDStB8JGsVsSLppwYWdnEPLE4xwFqRDn7xE/d3hjBQ6A0JGm1t+GtHB3GPIEjANFTnxQwHpR+cRttbL3mlQvpIYqCZOMZds9XA7VI5qgs0aSGUU8cNYKjmmrMpJa9sB4WVtj3M4u2fEXt9FKKCtjMMpOfiQxIkEhYZ+2GoAX5sHXan7TPcgwb5r7WW6j43aaPc6g9XWN63nonQz6KeMSFZ/y0o2HJMh1FEkktZw6A1HVfn+JNWoQb1glyqGjO1ync+Sok8yXpqakEEWpXNQSQYs4eBEwfkKql5EuolQMIbF9VYhpEcR9LfbMvYdq/RPKWN3mmRMWfPZ2dTZl515XBdV ansible@awx.sunil.cc
+[ansible@awx .ssh]$
+[ansible@awx .ssh]$ cat authorized_keys
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDStB8JGsVsSLppwYWdnEPLE4xwFqRDn7xE/d3hjBQ6A0JGm1t+GtHB3GPIEjANFTnxQwHpR+cRttbL3mlQvpIYqCZOMZds9XA7VI5qgs0aSGUU8cNYKjmmrMpJa9sB4WVtj3M4u2fEXt9FKKCtjMMpOfiQxIkEhYZ+2GoAX5sHXan7TPcgwb5r7WW6j43aaPc6g9XWN63nonQz6KeMSFZ/y0o2HJMh1FEkktZw6A1HVfn+JNWoQb1glyqGjO1ync+Sok8yXpqakEEWpXNQSQYs4eBEwfkKql5EuolQMIbF9VYhpEcR9LfbMvYdq/RPKWN3mmRMWfPZ2dTZl515XBdV ansible@awx.sunil.cc
+[ansible@awx .ssh]$ chmod 600 authorized_keys
+Client1
+
+[root@client1 ~]# su - ansible
+[ansible@client1 ~]$ mkdir .ssh
+[ansible@client1 ~]$ chmod 700 .ssh
+[ansible@client1 ~]$ cat .ssh/authorized_keys
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDStB8JGsVsSLppwYWdnEPLE4xwFqRDn7xE/d3hjBQ6A0JGm1t+GtHB3GPIEjANFTnxQwHpR+cRttbL3mlQvpIYqCZOMZds9XA7VI5qgs0aSGUU8cNYKjmmrMpJa9sB4WVtj3M4u2fEXt9FKKCtjMMpOfiQxIkEhYZ+2GoAX5sHXan7TPcgwb5r7WW6j43aaPc6g9XWN63nonQz6KeMSFZ/y0o2HJMh1FEkktZw6A1HVfn+JNWoQb1glyqGjO1ync+Sok8yXpqakEEWpXNQSQYs4eBEwfkKql5EuolQMIbF9VYhpEcR9LfbMvYdq/RPKWN3mmRMWfPZ2dTZl515XBdV ansible@awx.sunil.cc
+[ansible@client1 ~]$ chmod 600 .ssh/authorized_keys
+Client2
+
+[root@client2 ~]# su - ansible
+[ansible@client2 ~]$ mkdir .ssh
+[ansible@client2 ~]$ chmod 700 .ssh
+[ansible@client2 ~]$ cat .ssh/authorized_keys
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDStB8JGsVsSLppwYWdnEPLE4xwFqRDn7xE/d3hjBQ6A0JGm1t+GtHB3GPIEjANFTnxQwHpR+cRttbL3mlQvpIYqCZOMZds9XA7VI5qgs0aSGUU8cNYKjmmrMpJa9sB4WVtj3M4u2fEXt9FKKCtjMMpOfiQxIkEhYZ+2GoAX5sHXan7TPcgwb5r7WW6j43aaPc6g9XWN63nonQz6KeMSFZ/y0o2HJMh1FEkktZw6A1HVfn+JNWoQb1glyqGjO1ync+Sok8yXpqakEEWpXNQSQYs4eBEwfkKql5EuolQMIbF9VYhpEcR9LfbMvYdq/RPKWN3mmRMWfPZ2dTZl515XBdV ansible@awx.sunil.cc
+[ansible@client2 ~]$ chmod 600 .ssh/authorized_keys
+Check the passwordless login from AWX server.
+
+[ansible@awx ~]$ ssh client1
+Last login: Sun Mar 11 13:14:06 2018 from 192.168.1.25
+[ansible@client1 ~]$ exit
+logout
+Connection to client1 closed.
+[ansible@awx ~]$ ssh client2
+Last login: Sun Mar 11 12:50:14 2018 from 192.168.1.25
+[ansible@client2 ~]$
+Validate the Login:
+
+Ansible AWX Login
+
+The Login details are:
+
+Username: "admin"
+Password: "password"
+
+Ansible AWX dashboard
+
+In the next tutorial will show how to add a playbook and run the job.

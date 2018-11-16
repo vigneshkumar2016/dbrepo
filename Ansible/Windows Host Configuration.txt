@@ -1,0 +1,203 @@
+--------------------------------------------------------------------------------------------------
+Ansible windows Host Configuration
+--------------------------------------------------------------------------------------------------
+
+This notes contains steps to install Ansible 2.x on Ubuntu 14.04 server and manage Windows Server.
+
+– Install git
+
+$ apt-get install git
+– Clonning git repo
+
+$ git clone https://github.com/ansible/ansible.git --recursive
+– Install Development Tools
+
+$ apt-get install build-essential
+$ apt-get install python-pip libxml2-dev libxslt1-dev python-dev
+ pip install paramiko PyYAML Jinja2 httplib2 six pycrypto markupsafe xmltodict pywinrm
+– Setup Ansible Environment
+
+$ mv ansible /opt/
+$ cd /opt/ansible
+$ source /opt/ansible/hacking/env-setup
+$ export ANSIBLE_CONFIG="/opt/ansible/config/ansible.cfg"
+Note: Add above lines in your ~/.bashrc
+– Create Ansible Configuration File
+
+$ mkdir /opt/ansible/config
+$ vi /opt/ansible/config/ansible.cfg
+[defaults]
+hostfile = /opt/ansible/hosts
+library = /opt/ansible/lib/ansible/modules
+remote_tmp = $HOME/.ansible/tmp
+pattern = *
+forks = 5
+poll_interval = 15
+sudo_user = root
+transport = smart
+remote_port = 22
+roles_path = /opt/ansible/roles
+sudo_exe = sudo
+timeout = 10
+ansible_managed = Ansible managed: {file} modified on %Y-%m-%d %H:%M:%S by {uid} on {host}
+ 
+action_plugins = /opt/ansible/lib/ansible/plugins/action
+callback_plugins = /opt/ansible/lib/ansible/plugins/callback_
+connection_plugins = /opt/ansible/lib/ansible/plugins/connection
+lookup_plugins = /opt/ansible/lib/ansible/plugins/lookup
+vars_plugins = /opt/ansible/lib/ansible/plugins/vars
+filter_plugins = /opt/ansible/lib/ansible/plugins/filter
+inventory_plugins = /opt/ansible/lib/ansible/plugins/inventory
+shell_plugins = /opt/ansible/lib/ansible/plugins/shell
+strategy_plugins = /opt/ansible/lib/ansible/plugins/strategy
+ 
+[paramiko_connection]
+ 
+[ssh_connection]
+ 
+[accelerate]
+accelerate_port = 5099
+accelerate_timeout = 30
+accelerate_connect_timeout = 5.0
+– Create Ansible group variables
+
+$ mkdir /opt/ansible/group_vars
+$ ansible-vault create /opt/ansible/group_vars/windows.yml
+ansible_hosts: windows
+ansible_user: user_name@MY.DOMAIN.COM
+ansible_password: password
+ansible_port: 5986
+ansible_connection: winrm
+# The following is necessary for Python 2.7.9+ when using default WinRM self-signed certificates:
+ansible_winrm_server_cert_validation: ignore
+ 
+
+Note: As we are storing password information in windows.yml, we have encrypted that file using “ansible-vault”. Ansible-valut will ask for password to encrypt file.
+
+– Create Ansible host inventory file
+
+$ vi /opt/ansible/hosts
+[windows]
+xxx.xxx.xxx.xxx
+AD integration (Optional):
+If we have AD authentication in place, you need to configure Kerberos first on your machine.
+
+$ apt-get install python-dev libkrb5-dev
+$ pip install kerberos
+$ apt-get install krb5-user
+$ mv /etc/krb5.conf /etc/krb5.conf_Original
+$ vi /etc/krb5.conf
+[realms]
+MY.DOMAIN.COM = {
+ kdc = dc1.my.domain.com
+ kdc = dc2.my.domain.com
+}
+[domain_realm]
+ .my.domain.com = MY.DOMAIN.COM
+Note: To Get kdc list on any domain logged in machine just try: nltest /dclist:my.domain.com
+
+$ kinit user_name@MY.DOMAIN.COM
+$ klist
+ 
+
+– Check Ping to Windows host from Ansible
+
+$ ansible windows -i hosts -m win_ping --ask-vault-pass
+Note: –ask-vault-pass will ask for password to decrypt group_vars/windows.yml.
+Note: To Prepare Windows Server, you need to enable WinRM service. Follow steps given on http://docs.ansible.com/ansible/intro_windows.html#windows-system-prep
+Or Just download this Powershell script https://github.com/ansible/ansible/blob/devel/examples/scripts/ConfigureRemotingForAnsible.ps1
+And open Powershell by using “Run as Administrator” It should enable WinRM along with firewall rules on Port 5986
+Also note that you must have PowerShell Version 3+ . You can get current version using $PSVersionTable.PSVersion
+
+To Get Facts about Windows System, which we can use later as variables:
+
+$ ansible windows -i hosts -m setup
+To Create empty file c:\test.txt:
+
+$ ansible windows -i hosts -m win_file -a 'path=c:\\test.txt state=touch' --ask-vault-pass
+To Stop and start Windows Time Service:
+
+$ ansible windows -i hosts -m win_service -a 'name="Windows Time" state=stopped' --ask-vault-pass
+$ ansible windows -i hosts -m win_service -a 'name="Windows Time" state=started' --ask-vault-pass
+To Copy file from Linux Controller host to Windows Host:
+
+$ ansible windows -i hosts -m win_copy -a 'src=playbooks/files/application1.ini dest=c:\\work' --ask-vault-pass
+My directory structure is :
+/opt/ansible
+├── ansible-core-sitemap.xml
+├── group_vars
+│                      ├── all
+│                      └── windows.yml
+├── playbooks
+│                  ├── file_demo.yml
+│                  ├── files
+│                  │           └── application1.ini
+│                  ├── service_demo.yml
+│                  ├── template_demo.yml
+│                  ├── templates
+│                  │            └── settings.ini
+│                  └── win_package_demo.yml
+├── hosts
+
+I am executing command inside /opt/ansible
+
+Content of /opt/ansible/all
+
+1
+DocRoot: 'C:\work'
+Content of /opt/ansible/playbooks/templates/settings.ini
+
+
+Hostname of Windows Server = {{ansible_hostname}}
+FQDN of Windows Server = {{ansible_fqdn}}
+IPv4 Address of Windows Server = {{ ansible_ip_addresses[0]}}
+Document Root of Server = {{DocRoot}}
+Content of /opt/ansible/playbooks/file_demo.yml
+
+---
+- name: Create Files and Directories
+  hosts: windows
+  tasks:
+   - name: Create Empty file C:\test.txt
+     win_file: path=C:\\test.txt state=touch
+   - name: Create Empty Directory C:\work
+     win_file: path=C:\\Work state=directory
+Content of /opt/ansible/playbooks/copy_demo.yml
+
+---
+- name: Copy file from Controller machine to Windows Server
+  hosts: windows
+  tasks:
+   - name: Copying file application1.ini to C:\work
+     win_copy: src=files/application1.ini to C:\\work
+Content of /opt/ansible/playbooks/template_demo.yml
+
+---
+- name: Template Demo
+  hosts: windows
+  gather_facts: yes
+  tasks:
+   - name: Deploy settings.ini to C:\work
+     win_template: src=templates/settings.ini dest=C:\\work
+Content of /opt/ansible/playbooks/win_package_demo.yml
+
+---
+- hosts: windows
+  tasks:
+   - name: Install Jenkins from Windows Share
+     win_package: path=\\\\<ServerIP of Share>\\work\\jenkins-1.533.msi product_id="{A8699B6B-8EF5-41BC-9D4D-EAD3070D383E}" state=present
+To Get Product ID of an installed package run below command in powershell:
+
+1
+get-wmiobject Win32_Product | Format-Table IdentifyingNumber, Name
+Invoke Playbook using:
+
+$ cd /opt/ansible
+$ ansible-playbook -i hosts playbooks/file_demo.yml --ask-vault-pass
+$ ansible-playbook -i hosts playbooks/copy_demo.yml --ask-vault-pass
+$ ansible-playbook -i hosts playbooks/template_demo.yml --ask-vault-pass
+$ ansible-playbook -i hosts playbooks/win_package_demo.yml --ask-vault-pass
+– file_demo.yml will Create empty file C:\test.txt and Empty directory C:\work on Windows Server
+– copy_demo.yml will Copy application1.ini from Ansible machine to c:\work on Windows Server
+– template_demo.yml will deploy settings.ini from Ansible machine to C:\work on Windows Server. it will also get varialbe information from aansible facts and group_vars/all
+– win_package_demo.yml will install jenkins…msi stored on remote Windows Share.
