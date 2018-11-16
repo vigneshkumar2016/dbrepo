@@ -1,0 +1,57 @@
+
+# Links for COnfiguring Kerberos and Active Directory:
+
+https://www.mssqltips.com/sqlservertip/5075/configure-sql-server-on-linux-to-use-windows-authentication/
+https://www.rootusers.com/how-to-configure-linux-to-authenticate-using-kerberos/
+http://www.ryanjadams.com/2016/03/sql-server-on-linux-authentication/#axzz5G8V44YES
+https://port1433.com/2017/09/19/active-directory-authentication-with-sql-server-on-ubuntu/
+https://stackoverflow.com/questions/37835929/connect-to-sql-server-with-windows-authentication-from-a-linux-machine-through-j
+
+# Adding Linux SQL to AD domain
+
+# STEP 1
+#RHEL
+sudo yum install realmd krb5-workstation
+
+#Step2 
+/etc/sysconfig/network-scripts/ifcfg-eth0
+<...>
+PEERDNS=no
+DNS1=**<AD domain controller IP address>**
+
+#Step3
+
+sudo systemctl restart network
+
+#Step4
+nameserver **<AD domain controller IP address>**
+
+#Step5
+Once you've confirmed that your DNS is configured properly, 
+join the domain by running the following command. 
+You must authenticate using an AD account that has sufficient privileges in AD to join a new machine to the domain.
+Specifically, this command creates a new computer account in AD, 
+create the /etc/krb5.keytab host keytab file, and configure the domain in /etc/sssd/sssd.conf:
+
+#Step6
+sudo realm join contoso.com -U 'user@CONTOSO.COM' -v
+<...>
+* Successfully enrolled machine in realm
+
+#Step7
+id user@contoso.com
+uid=1348601103(user@contoso.com) gid=1348600513(domain group@contoso.com) groups=1348600513(domain group@contoso.com)
+
+#Step8
+kinit user@CONTOSO.COM
+Password for user@CONTOSO.COM:
+
+#Step9
+klist
+Ticket cache: FILE:/tmp/krb5cc_1000
+Default principal: user@CONTOSO.COM
+<...>
+
+
+#kubernetes-deployment
+https://www.mirantis.com/blog/introduction-to-yaml-creating-a-kubernetes-deployment/

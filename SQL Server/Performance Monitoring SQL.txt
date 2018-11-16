@@ -1,0 +1,1246 @@
+--------------------------------------------------------------------------------------------------
+-------------------------------Performance Monitoring Script--------------------------------------
+
+
+CREATE TABLE #VLFInfo(
+	  [RecoveryUnitId] int NULL,
+      [FileId] [tinyint] NULL,
+      [FileSize] [bigint] NULL,
+      [StartOffset] [bigint] NULL,
+      [FSeqNo] [int] NULL,
+      [Status] [tinyint] NULL,
+      [Parity] [tinyint] NULL,
+      [CreateLSN] [numeric](25, 0) NULL
+) ON [PRIMARY]
+ 
+CREATE TABLE #VLFCountResults(databasename sysname,fileid int, Free int, InUse int, VLFCount int)
+ 
+EXEC sp_MSforeachdb N'Use [?];
+INSERT INTO #VLFInfo
+EXEC sp_executesql N''DBCC LOGINFO([?])''
+;with vlfUse as
+(
+select max(db_name()) databasename,fileid,
+sum(case when status = 0 then 1 else 0 end) as Free,
+sum(case when status != 0 then 1 else 0 end) as InUse,
+count(*) cnt
+from #VLFInfo
+group by fileid
+)
+INSERT INTO #VLFCountResults
+select *  from vlfUse
+TRUNCATE TABLE #VLFInfo
+'
+--select * from #VLFCountResults
+ 
+;WITH DatbaseVLF AS(
+SELECT 
+DB_ID(dbs.[name]) AS DatabaseID,
+dbs.[name] AS dbName, 
+CONVERT(DECIMAL(18,2), p2.cntr_value/1024.0) AS [Log Size (MB)],
+CONVERT(DECIMAL(18,2), p1.cntr_value/1024.0) AS [Log Size Used (MB)]
+FROM sys.databases AS dbs WITH (NOLOCK)
+INNER JOIN sys.dm_os_performance_counters AS p1  WITH (NOLOCK) ON dbs.name = p1.instance_name
+INNER JOIN sys.dm_os_performance_counters AS p2 WITH (NOLOCK) ON dbs.name = p2.instance_name
+WHERE p1.counter_name LIKE N'Log File(s) Used Size (KB)%' 
+AND p2.counter_name LIKE N'Log File(s) Size (KB)%'
+AND p2.cntr_value > 0 
+)
+SELECT	[dbName],
+		[Log Size (MB)], 
+		[Log Size Used (MB)], 
+		[Log Size (MB)]-[Log Size Used (MB)] [Log Free (MB)], 
+		cast([Log Size Used (MB)]/[Log Size (MB)]*100 as decimal(10,2)) [Log Space Used %],
+		max(VLFCount) AS [Number of VLFs] ,
+		max(Free) Free,
+		Max(InUse) InUse
+FROM DatbaseVLF AS vlf  
+INNER JOIN #VLFCountResults b on vlf.dbName=b.databasename
+GROUP BY dbName, [Log Size (MB)],[Log Size Used (MB)]
+ 
+DROP TABLE #VLFInfo;
+DROP TABLE #VLFCountResults
+
+
+
+---------------------------------------------------------------------------------------------------------
+
+USE MASTER
+GO
+ 
+ 
+DECLARE @DML nvarchar(MAX)
+ 
+DECLARE @PerfomanceMonitoringCacheMemory TABLE(
+[Database_Name] [nvarchar](128) NULL,
+BufferPageCnt int,
+BufferSizeMB [decimal](10, 2) NULL,
+PageStatus varchar(10)
+)
+ 
+ 
+SET @DML='SELECT DBName = CASE WHEN database_id = 32767 THEN ''RESOURCEDB''
+				ELSE DB_NAME(database_id) END,
+	Bufferpage=count_BIG(*),
+	BufferSizeMB = COUNT(1)/128,
+	PageStatus = max(CASE WHEN is_modified = 1 THEN ''Dirty'' 
+				ELSE ''Clean'' END)
+FROM sys.dm_os_buffer_descriptors
+GROUP BY database_id
+ORDER BY 2 DESC'
+ 
+INSERT INTO @PerfomanceMonitoringCacheMemory
+EXEC sp_executesql @DML
+ 
+SELECT * FROM @PerfomanceMonitoringCacheMemory
+ 
+--------------------------------------------------------------------------------------------------------------
+
+DECLARE @DML nvarchar(MAX)
+ 
+DECLARE @PerfomanceMonitoring TABLE (
+[row_num] [bigint] NULL,
+[DatabaseName] [nvarchar](128) NULL,
+[CPU_Time_Ms] [bigint] NULL,
+[CPUPercent] [decimal](5, 2) NULL,
+[RowsReturned] bigint,
+ExecutionCount bigint
+)
+ 
+SET @DML='WITH DBCPUStats
+AS
+(SELECT DatabaseID, DB_Name(DatabaseID) AS [DatabaseName], SUM(total_worker_time) AS [CPU_Time_Ms],  SUM(execution_count)  AS [ExecutionCount],
+SUM(total_rows)  AS [RowsReturned]
+FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
+CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID]
+FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+WHERE attribute = N''dbid'') AS F_DB
+GROUP BY DatabaseID)
+SELECT ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [row_num],
+DatabaseName, [CPU_Time_Ms],
+CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPUPercent],
+[RowsReturned],
+[ExecutionCount]
+FROM DBCPUStats
+WHERE DatabaseID > 4 -- system databases
+AND DatabaseID <> 32767 -- ResourceDB
+ORDER BY row_num OPTION (RECOMPILE)'
+ 
+--How many Virtual Log Files or VLFs are present in your log file.
+INSERT INTO @PerfomanceMonitoring
+EXEC sp_executesql @DML
+ 
+ 
+SELECT * FROM @PerfomanceMonitoring
+ 
+ 
+------------------------------------------------------------------------------------------------------------------
+
+ 
+USE MASTER
+GO
+ 
+DECLARE @DML nvarchar(MAX)
+ 
+DECLARE @PerfomanceMonitoring TABLE
+(
+[I/ORank] [int] NULL,
+[DBName] [nvarchar](128) NULL,
+[driveLetter] [nvarchar](1) NULL,
+[totalNumOfWrites] [bigint] NULL,
+[totalNumOfBytesWritten] [bigint] NULL,
+[totalNumOfReads] [bigint] NULL,
+totalNumOfBytesRead [bigint] NULL,
+[totalI/O(MB)] [decimal](12,2) NULL,
+[I/O(%)] [decimal](5, 2) NULL,
+[SizeOfFile] [decimal](10,2) NULL
+)
+SET @DML='
+WITH SQLShackIOStatistics
+AS
+(
+select 
+db_name(mf.database_id) as dbname, 
+left(mf.physical_name, 1) as driveLetter, 
+sum(vfs.num_of_writes) [totalNumOfWrites],
+sum(vfs.num_of_bytes_written) [totalNumOfBytesWritten],
+sum(vfs.num_of_reads) [totalNumOfReads], 
+sum(vfs.num_of_bytes_read) [totalNumOfBytesRead], 
+cast(SUM(num_of_bytes_read + num_of_bytes_written)/1024 AS DECIMAL(12, 2)) AS [TotIO(MB)],
+MAX(cast(vfs.size_on_disk_bytes/1024/1024.00 as decimal(10,2))) SizeMB
+from sys.master_files mf
+join sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+on mf.database_id=vfs.database_id and mf.file_id=vfs.file_id
+GROUP BY mf.database_id,left(mf.physical_name, 1))
+SELECT 
+	ROW_NUMBER() OVER(ORDER BY [TotIO(MB)] DESC) AS [I/ORank],
+	[dbname],
+	driveLetter,
+	[totalNumOfWrites],
+	totalNumOfBytesWritten,
+	totalNumOfReads,
+	totalNumOfBytesRead,
+	[TotIO(MB)] AS [I/O(MB)],
+	CAST([TotIO(MB)]/ SUM([TotIO(MB)]) OVER() * 100.0 AS DECIMAL(5,2)) AS [I/O(%)],
+	SizeMB
+	FROM SQLShackIOStatistics
+	ORDER BY [I/ORank]
+OPTION (RECOMPILE)
+'
+INSERT INTO @PerfomanceMonitoring
+EXEC sp_executesql @DML
+ 
+--SELECT * FROM @PerfomanceMonitoring
+ 
+ 
+select [DBName],
+[I/O Rank] = 
+   STUFF(
+(SELECT ',' + cast(s.[I/ORank] as varchar(3))
+FROM @PerfomanceMonitoring s
+WHERE s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+physicalName=STUFF(
+(SELECT ',' + s.driveLetter
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,'') ,
+FileSizeMB=STUFF(
+(SELECT ',' + cast(s.SizeOfFile as varchar(20))
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,'') ,
+total_num_of_writes=STUFF(
+(SELECT ',' + cast(s.[totalNumOfWrites] as varchar(20))
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+total_num_of_bytes_written=STUFF(
+(SELECT ',' + cast(s.[totalNumOfBytesWritten] as varchar(20))
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+total_num_of_reads=STUFF(
+(SELECT ',' + cast(s.totalnumofreads as varchar(20))
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+total_num_of_Bytes_reads=STUFF(
+(SELECT ',' + cast(s.totalNumOfBytesRead as varchar(20))
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+[Total I/O (MB)]=STUFF(
+(SELECT ',' + cast(s.[TotalI/O(MB)] as varchar(20))
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+[I/O Percent]=STUFF(
+(SELECT ',' + cast(s.[I/O(%)] as varchar(20))
+FROM @PerfomanceMonitoring s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,'')
+from @PerfomanceMonitoring t
+group by [DBName]
+
+ 
+-------------------------------------------------------------------------------------------------------------------
+
+USE MASTER
+GO
+ 
+DECLARE @DML nvarchar(MAX)
+DECLARE @PerfomanceMonitoringUserConnections TABLE
+(
+DBName [nvarchar](128) NULL,
+No_Of_Connections [int] NULL
+)
+ 
+SET @DML='
+SELECT DB_NAME(dbid) DBName,COUNT(*) No_Of_Connections FROM sys.sysprocesses --where kpid>0
+group by DB_NAME(dbid)
+ORDER BY DB_NAME(dbid) DESC OPTION (RECOMPILE)
+'
+ 
+INSERT INTO @PerfomanceMonitoringUserConnections
+EXEC sp_executesql @DML
+ 
+select * from @PerfomanceMonitoringUserConnections
+
+
+--------------------------------------------------------------------------------------------------------------------
+
+DECLARE @DML nvarchar(MAX)
+ 
+DECLARE @PerfomanceMonitoringCPUStats TABLE (
+[row_num] [bigint] NULL,
+[DatabaseName] [nvarchar](128) NULL,
+[CPU_Time_Ms] [bigint] NULL,
+[CPUPercent] [decimal](5, 2) NULL,
+[RowsReturned] bigint,
+ExecutionCount bigint
+)
+ 
+SET @DML='WITH DBCPUStats
+AS
+(SELECT DatabaseID, DB_Name(DatabaseID) AS [DatabaseName], SUM(total_worker_time) AS [CPU_Time_Ms],  SUM(execution_count)  AS [ExecutionCount],
+SUM(total_rows)  AS [RowsReturned]
+FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
+CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID]
+FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+WHERE attribute = N''dbid'') AS F_DB
+GROUP BY DatabaseID)
+SELECT ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [row_num],
+DatabaseName, [CPU_Time_Ms],
+CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPUPercent],
+[RowsReturned],
+[ExecutionCount]
+FROM DBCPUStats
+WHERE DatabaseID > 4 -- system databases
+AND DatabaseID <> 32767 -- ResourceDB
+ORDER BY row_num OPTION (RECOMPILE)'
+ 
+--How many Virtual Log Files or VLFs are present in your log file.
+INSERT INTO @PerfomanceMonitoringCPUStats
+EXEC sp_executesql @DML
+ 
+ 
+SELECT * FROM @PerfomanceMonitoringCPUStats
+ 
+----------------------------------------------------------------------------------------------------------------------
+
+USE MASTER
+GO
+ 
+ 
+DECLARE @DML1 nvarchar(MAX),
+@DML2 nvarchar(MAX),
+@DML3 nvarchar(MAX),
+@DML4 nvarchar(MAX)
+ 
+DECLARE @PerformanceMonitoringIOStatistics TABLE
+(
+[I/ORank] [int] NULL,
+[DBName] [nvarchar](128) NULL,
+[driveLetter] [nvarchar](1) NULL,
+[totalNumOfWrites] [bigint] NULL,
+[totalNumOfBytesWritten] [bigint] NULL,
+[totalNumOfReads] [bigint] NULL,
+totalNumOfBytesRead [bigint] NULL,
+[totalI/O(MB)] [decimal](12,2) NULL,
+[I/O(%)] [decimal](5, 2) NULL,
+[SizeOfFile] [decimal](10,2) NULL
+)
+SET @DML1='
+WITH PerformanceMonitoringIOStatistics
+AS
+(
+select 
+db_name(mf.database_id) as dbname, 
+left(mf.physical_name, 1) as driveLetter, 
+sum(vfs.num_of_writes) [totalNumOfWrites],
+sum(vfs.num_of_bytes_written) [totalNumOfBytesWritten],
+sum(vfs.num_of_reads) [totalNumOfReads], 
+sum(vfs.num_of_bytes_read) [totalNumOfBytesRead], 
+cast(SUM(num_of_bytes_read + num_of_bytes_written)/1024 AS DECIMAL(12, 2)) AS [TotIO(MB)],
+MAX(cast(vfs.size_on_disk_bytes/1024/1024.00 as decimal(10,2))) SizeMB
+from sys.master_files mf
+join sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+on mf.database_id=vfs.database_id and mf.file_id=vfs.file_id
+GROUP BY mf.database_id,left(mf.physical_name, 1))
+SELECT 
+	ROW_NUMBER() OVER(ORDER BY [TotIO(MB)] DESC) AS [I/ORank],
+	[dbname],
+	driveLetter,
+	[totalNumOfWrites],
+	totalNumOfBytesWritten,
+	totalNumOfReads,
+	totalNumOfBytesRead,
+	[TotIO(MB)] AS [I/O(MB)],
+	CAST([TotIO(MB)]/ SUM([TotIO(MB)]) OVER() * 100.0 AS DECIMAL(5,2)) AS [I/O(%)],
+	SizeMB
+	FROM PerformanceMonitoringIOStatistics
+	ORDER BY [I/ORank]
+OPTION (RECOMPILE)
+'
+INSERT INTO @PerformanceMonitoringIOStatistics
+EXEC sp_executesql @DML1
+ 
+ 
+--SQL 2017 
+ 
+--select [Database Name],
+--STRING_AGG( [I/O Rank],',')  [I/O Rank],
+--STRING_AGG(physicalName,',') physicalName,
+--STRING_AGG(total_num_of_writes,',') total_num_of_writes,
+--STRING_AGG(total_num_of_bytes_written,',') total_num_of_bytes_written,
+--STRING_AGG(total_num_of_reads,',') total_num_of_reads,
+--STRING_AGG([Total I/O (MB)],',') [Total I/O (MB)],
+--STRING_AGG([I/O Percent],',') WITHIN GROUP (ORDER BY [Database Name] ASC) [I/O Percent]
+--from @Aggregate_IO_Statistics
+--group by [Database Name]
+ 
+ 
+ 
+ 
+SELECT * FROM @PerformanceMonitoringIOStatistics
+ 
+--User Connections
+ 
+DECLARE @PerformanceMonitoringUserConn TABLE
+(
+DBName [nvarchar](128) NULL,
+No_Of_Connections [int] NULL
+)
+ 
+SET @DML2='
+SELECT DB_NAME(dbid) DBName,COUNT(*) No_Of_Connections FROM sys.sysprocesses --where kpid>0
+group by DB_NAME(dbid)
+ORDER BY DB_NAME(dbid) DESC OPTION (RECOMPILE)
+'
+ 
+INSERT INTO @PerformanceMonitoringUserConn
+EXEC sp_executesql @DML2
+ 
+select * from @PerformanceMonitoringUserConn
+ 
+--Memory
+ 
+DECLARE @PerformanceMonitoringCacheMemory TABLE(
+[Database_Name] [nvarchar](128) NULL,
+BufferPageCnt int,
+BufferSizeMB [decimal](10, 2) NULL,
+PageStatus varchar(10)
+)
+ 
+ 
+SET @DML3='SELECT DBName = CASE WHEN database_id = 32767 THEN ''RESOURCEDB''
+				ELSE DB_NAME(database_id) END,
+	Bufferpage=count_BIG(*),
+	BufferSizeMB = COUNT(1)/128,
+	PageStatus = max(CASE WHEN is_modified = 1 THEN ''Dirty'' 
+				ELSE ''Clean'' END)
+FROM sys.dm_os_buffer_descriptors
+GROUP BY database_id
+ORDER BY 2 DESC'
+ 
+INSERT INTO @PerformanceMonitoringCacheMemory
+EXEC sp_executesql @DML3
+ 
+SELECT * FROM @PerformanceMonitoringCacheMemory
+ 
+--SELECT * FROM @CacheMemoryDB
+ 
+--CPU
+ 
+DECLARE @PerformanceMonitoringCPUStats TABLE (
+[row_num] [bigint] NULL,
+[DatabaseName] [nvarchar](128) NULL,
+[CPU_Time_Ms] [bigint] NULL,
+[CPUPercent] [decimal](5, 2) NULL,
+[RowsReturned] bigint,
+ExecutionCount bigint
+)
+ 
+SET @DML4='WITH DBCPUStats
+AS
+(SELECT DatabaseID, DB_Name(DatabaseID) AS [DatabaseName], SUM(total_worker_time) AS [CPU_Time_Ms],  SUM(execution_count)  AS [ExecutionCount],
+SUM(total_rows)  AS [RowsReturned]
+FROM sys.dm_exec_query_stats AS qs WITH (NOLOCK)
+CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID]
+FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+WHERE attribute = N''dbid'') AS F_DB
+GROUP BY DatabaseID)
+SELECT ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [row_num],
+DatabaseName, [CPU_Time_Ms],
+CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPUPercent],
+[RowsReturned],
+[ExecutionCount]
+FROM DBCPUStats
+WHERE DatabaseID > 4 -- system databases
+AND DatabaseID <> 32767 -- ResourceDB
+ORDER BY row_num OPTION (RECOMPILE)'
+ 
+--How many Virtual Log Files or VLFs are present in your log file.
+INSERT INTO @PerformanceMonitoringCPUStats
+EXEC sp_executesql @DML4
+ 
+ 
+SELECT * FROM @PerformanceMonitoringCPUStats
+ 
+ 
+--VLF
+ 
+CREATE TABLE #VLFInfo(
+	  [RecoveryUnitId] int NULL,
+      [FileId] [tinyint] NULL,
+      [FileSize] [bigint] NULL,
+      [StartOffset] [bigint] NULL,
+      [FSeqNo] [int] NULL,
+      [Status] [tinyint] NULL,
+      [Parity] [tinyint] NULL,
+      [CreateLSN] [numeric](25, 0) NULL
+) ON [PRIMARY]
+ 
+CREATE TABLE #VLFCountResults(databasename sysname,fileid int, Free int, InUse int, VLFCount int)
+ 
+EXEC sp_MSforeachdb N'Use [?];
+INSERT INTO #VLFInfo
+EXEC sp_executesql N''DBCC LOGINFO([?])''
+;with vlfUse as
+(
+select max(db_name()) databasename,fileid,
+sum(case when status = 0 then 1 else 0 end) as Free,
+sum(case when status != 0 then 1 else 0 end) as InUse,
+count(*) cnt
+from #VLFInfo
+group by fileid
+)
+INSERT INTO #VLFCountResults
+select *  from vlfUse
+TRUNCATE TABLE #VLFInfo
+'
+-- SQL 2017
+ 
+--;WITH DatbaseVLF AS(
+--SELECT 
+--DB_ID(dbs.[name]) AS DatabaseID,
+--dbs.[name] AS dbName, 
+--CONVERT(DECIMAL(18,2), p2.cntr_value/1024.0) AS [Log Size (MB)],
+--CONVERT(DECIMAL(18,2), p1.cntr_value/1024.0) AS [Log Size Used (MB)]
+--FROM sys.databases AS dbs WITH (NOLOCK)
+--INNER JOIN sys.dm_os_performance_counters AS p1  WITH (NOLOCK) ON dbs.name = p1.instance_name
+--INNER JOIN sys.dm_os_performance_counters AS p2 WITH (NOLOCK) ON dbs.name = p2.instance_name
+--WHERE p1.counter_name LIKE N'Log File(s) Used Size (KB)%' 
+--AND p2.counter_name LIKE N'Log File(s) Size (KB)%'
+--AND p2.cntr_value > 0 
+--)
+--SELECT	[dbName],
+--		[Log Size (MB)], 
+--		[Log Size Used (MB)], 
+--		[Log Size (MB)]-[Log Size Used (MB)] [Log Free (MB)], 
+--		cast([Log Size Used (MB)]/[Log Size (MB)]*100 as decimal(10,2)) [Log Space Used %],
+--		COUNT(b.database_id) AS [Number of VLFs] ,
+--		sum(case when b.vlf_status = 0 then 1 else 0 end) as Free,
+--		sum(case when b.vlf_status != 0 then 1 else 0 end) as InUse		
+--FROM DatbaseVLF AS vlf  
+--CROSS APPLY sys.dm_db_log_info(vlf.DatabaseID) b
+--GROUP BY dbName, [Log Size (MB)],[Log Size Used (MB)]
+ 
+--select * from #VLFCountResults
+ 
+;WITH DatbaseVLF AS(
+SELECT 
+DB_ID(dbs.[name]) AS DatabaseID,
+dbs.[name] AS dbName, 
+CONVERT(DECIMAL(18,2), p2.cntr_value/1024.0) AS [Log Size (MB)],
+CONVERT(DECIMAL(18,2), p1.cntr_value/1024.0) AS [Log Size Used (MB)]
+FROM sys.databases AS dbs WITH (NOLOCK)
+INNER JOIN sys.dm_os_performance_counters AS p1  WITH (NOLOCK) ON dbs.name = p1.instance_name
+INNER JOIN sys.dm_os_performance_counters AS p2 WITH (NOLOCK) ON dbs.name = p2.instance_name
+WHERE p1.counter_name LIKE N'Log File(s) Used Size (KB)%' 
+AND p2.counter_name LIKE N'Log File(s) Size (KB)%'
+AND p2.cntr_value > 0 
+)
+SELECT
+		db.Servername,
+		cs.DatabaseName DatabaseName,
+		db.Status,
+		db.DataFiles [DataFile(s)],
+		db.[Data MB],
+		db.LogFiles [LogFile(s)],
+		db.[Log MB],
+		db.TotalSizeMB [DatabaseSize (MB)],
+		db.RecoveryModel,
+		db.Version,
+		isnull(cs.CPU_Time_Ms,0) CPUTimeMs,
+		isnull(cs.CPUPercent,0) [CPU (%)],
+		cs.RowsReturned,
+		cs.ExecutionCount,
+		isnull(cm.BufferSizeMB ,0) BufferSizeMB,
+		cm.BufferPageCnt ,
+		cm.PageStatus,
+		isnull(uc.No_Of_connections,0) NumberOfConnections,
+		AIS.physicalName,
+		AIS.total_num_of_writes,
+		AIS.total_num_of_bytes_written,
+		AIS.total_num_of_reads,
+		AIS.[Total I/O (MB)],
+		AIS.[I/O Percent],
+		VR.[Log Size (MB)], 
+		VR.[Log Size Used (MB)], 
+		VR.[Log Free (MB)], 
+		VR.[Log Space Used %],
+		VR.[Number of VLFs]  VirtualLogCnt,
+		VR.Free,
+		VR.InUse
+FROM @PerformanceMonitoringCPUStats cs
+left join @PerformanceMonitoringCacheMemory CM on cm.Database_Name=cs.DatabaseName
+left join @PerformanceMonitoringUserConn uc on uc.dbname=cs.DatabaseName
+left join 
+(
+SELECT	[dbName],
+		[Log Size (MB)], 
+		[Log Size Used (MB)], 
+		[Log Size (MB)]-[Log Size Used (MB)] [Log Free (MB)], 
+		cast([Log Size Used (MB)]/[Log Size (MB)]*100 as decimal(10,2)) [Log Space Used %],
+		max(VLFCount) AS [Number of VLFs] ,
+		max(Free) Free,
+		Max(InUse) InUse
+FROM DatbaseVLF AS vlf  
+INNER JOIN #VLFCountResults b on vlf.dbName=b.databasename
+GROUP BY dbName, [Log Size (MB)],[Log Size Used (MB)]
+)
+VR on VR.[dbName]=cs.DatabaseName
+left join (
+ 
+ 
+select [DBName],
+[I/O Rank] = 
+   STUFF(
+(SELECT ',' + cast(s.[I/ORank] as varchar(3))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+physicalName=STUFF(
+(SELECT ',' + s.driveLetter
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,'') ,
+FileSizeMB=STUFF(
+(SELECT ',' + cast(s.SizeOfFile as varchar(20))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,'') ,
+total_num_of_writes=STUFF(
+(SELECT ',' + cast(s.[totalNumOfWrites] as varchar(20))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+total_num_of_bytes_written=STUFF(
+(SELECT ',' + cast(s.[totalNumOfBytesWritten] as varchar(20))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+total_num_of_reads=STUFF(
+(SELECT ',' + cast(s.totalnumofreads as varchar(20))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+total_num_of_Bytes_reads=STUFF(
+(SELECT ',' + cast(s.totalNumOfBytesRead as varchar(20))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+[Total I/O (MB)]=STUFF(
+(SELECT ',' + cast(s.[TotalI/O(MB)] as varchar(20))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,''),
+[I/O Percent]=STUFF(
+(SELECT ',' + cast(s.[I/O(%)] as varchar(20))
+FROM @PerformanceMonitoringIOStatistics s
+WHERE  s.[DBName] = t.[DBName]
+FOR XML PATH('')),1,1,'')
+from @PerformanceMonitoringIOStatistics t
+group by [DBName]
+)AIS on AIS.DBName=cs.DatabaseName
+inner join
+(
+SELECT @@SERVERNAME Servername,
+CONVERT(VARCHAR(25), DB.name) AS dbName,
+CONVERT(VARCHAR(10), DATABASEPROPERTYEX(name, 'status')) AS [Status],
+(SELECT COUNT(1) FROM sysaltfiles WHERE DB_NAME(dbid) = DB.name AND groupid !=0 ) AS DataFiles,
+(SELECT SUM((size*8)/1024) FROM sysaltfiles WHERE DB_NAME(dbid) = DB.name AND groupid!=0) AS [Data MB],
+(SELECT COUNT(1) FROM sysaltfiles WHERE DB_NAME(dbid) = DB.name AND groupid=0) AS LogFiles,
+(SELECT SUM((size*8)/1024) FROM sysaltfiles WHERE DB_NAME(dbid) = DB.name AND groupid=0) AS [Log MB],
+(SELECT SUM((size*8)/1024) FROM sysaltfiles WHERE DB_NAME(dbid) = DB.name AND groupid!=0)+(SELECT SUM((size*8)/1024) FROM sysaltfiles WHERE DB_NAME(dbid) = DB.name AND groupid=0) TotalSizeMB,
+convert(sysname,DatabasePropertyEx(name,'Recovery')) RecoveryModel ,
+convert(sysname,DatabasePropertyEx(name,'Version')) Version 
+FROM sys.databases DB
+) DB on DB.dbName=cs.DatabaseName
+--order by io.[I/O Percent],cs.CPUPercent,cm.[Cached Size (MB)]desc
+ 
+ 
+ 
+DROP TABLE #VLFInfo;
+DROP TABLE #VLFCountResults;
+ 
+--------------------------------------------------------------------------------------------------------------
+
+DECLARE @BRPS BIGINT
+SELECT @BRPS=cntr_value 
+FROM sys.dm_os_performance_counters
+WHERE counter_name LIKE 'Batch Requests/sec%'
+WAITFOR DELAY '000:00:10'
+SELECT (cntr_value-@BRPS)/10.0 AS "Batch Requests/sec"
+FROM sys.dm_os_performance_counters
+WHERE counter_name LIKE 'Batch Requests/sec%'
+
+--------------------------------------------------------------------------------------------------------------
+
+--Queries in the cache that can use tuning
+
+SELECT top 10 text as "SQL Statement",
+   last_execution_time as "Last Execution Time",
+   (total_logical_reads+total_physical_reads+total_logical_writes)/execution_count as [Average IO],
+   (total_worker_time/execution_count)/1000000.0 as [Average CPU Time (sec)],
+   (total_elapsed_time/execution_count)/1000000.0 as [Average Elapsed Time (sec)],
+   execution_count as "Execution Count",
+   qp.query_plan as "Query Plan"
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.plan_handle) st
+CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+order by total_elapsed_time/execution_count desc
+
+---------------------------------------------------------------------------------------------------------------
+
+--SQL Free Available Memory
+
+SELECT available_physical_memory_kb/1024 as "Total Memory MB",
+       available_physical_memory_kb/(total_physical_memory_kb*1.0)*100 AS "% Memory Free"
+FROM sys.dm_os_sys_memory
+
+-----------------------------------------------------------------------------------------------------------------
+
+--SQL Job Failures at Recent
+
+use msdb
+go
+select 'FAILED' as Status, cast(sj.name as varchar(100)) as "Job Name",
+       cast(sjs.step_id as varchar(5)) as "Step ID",
+       cast(sjs.step_name as varchar(30)) as "Step Name",
+       cast(REPLACE(CONVERT(varchar,convert(datetime,convert(varchar,sjh.run_date)),102),'.','-')+' '+SUBSTRING(RIGHT('000000'+CONVERT(varchar,sjh.run_time),6),1,2)+':'+SUBSTRING(RIGHT('000000'+CONVERT(varchar,sjh.run_time),6),3,2)+':'+SUBSTRING(RIGHT('000000'+CONVERT(varchar,sjh.run_time),6),5,2) as varchar(30)) 'Start Date Time',
+       sjh.message as "Message"
+from sysjobs sj
+join sysjobsteps sjs 
+ on sj.job_id = sjs.job_id
+join sysjobhistory sjh 
+ on sj.job_id = sjh.job_id and sjs.step_id = sjh.step_id
+where sjh.run_status <> 1
+  and cast(sjh.run_date as float)*1000000+sjh.run_time > 
+      cast(convert(varchar(8), getdate()-1, 112) as float)*1000000+70000 --yesterday at 7am
+union
+select 'FAILED',cast(sj.name as varchar(100)) as "Job Name",
+       'MAIN' as "Step ID",
+       'MAIN' as "Step Name",
+       cast(REPLACE(CONVERT(varchar,convert(datetime,convert(varchar,sjh.run_date)),102),'.','-')+' '+SUBSTRING(RIGHT('000000'+CONVERT(varchar,sjh.run_time),6),1,2)+':'+SUBSTRING(RIGHT('000000'+CONVERT(varchar,sjh.run_time),6),3,2)+':'+SUBSTRING(RIGHT('000000'+CONVERT(varchar,sjh.run_time),6),5,2) as varchar(30)) 'Start Date Time',
+       sjh.message as "Message"
+from sysjobs sj
+join sysjobhistory sjh 
+ on sj.job_id = sjh.job_id
+where sjh.run_status <> 1 and sjh.step_id=0
+  and cast(sjh.run_date as float)*1000000+sjh.run_time >
+      cast(convert(varchar(8), getdate()-1, 112) as float)*1000000+70000 --yesterday at 7am
+	  
+	  
+-------------------------------------------------------------------------------------------------------------------
+
+-- Missing Index Script
+
+SELECT TOP 25
+dm_mid.database_id AS DatabaseID,
+dm_migs.avg_user_impact*(dm_migs.user_seeks+dm_migs.user_scans) Avg_Estimated_Impact,
+dm_migs.last_user_seek AS Last_User_Seek,
+OBJECT_NAME(dm_mid.OBJECT_ID,dm_mid.database_id) AS [TableName],
+'CREATE INDEX [IX_' + OBJECT_NAME(dm_mid.OBJECT_ID,dm_mid.database_id) + '_'
++ REPLACE(REPLACE(REPLACE(ISNULL(dm_mid.equality_columns,''),', ','_'),'[',''),']','') 
++ CASE
+WHEN dm_mid.equality_columns IS NOT NULL
+AND dm_mid.inequality_columns IS NOT NULL THEN '_'
+ELSE ''
+END
++ REPLACE(REPLACE(REPLACE(ISNULL(dm_mid.inequality_columns,''),', ','_'),'[',''),']','')
++ ']'
++ ' ON ' + dm_mid.statement
++ ' (' + ISNULL (dm_mid.equality_columns,'')
++ CASE WHEN dm_mid.equality_columns IS NOT NULL AND dm_mid.inequality_columns 
+IS NOT NULL THEN ',' ELSE
+'' END
++ ISNULL (dm_mid.inequality_columns, '')
++ ')'
++ ISNULL (' INCLUDE (' + dm_mid.included_columns + ')', '') AS Create_Statement
+FROM sys.dm_db_missing_index_groups dm_mig
+INNER JOIN sys.dm_db_missing_index_group_stats dm_migs
+ON dm_migs.group_handle = dm_mig.index_group_handle
+INNER JOIN sys.dm_db_missing_index_details dm_mid
+ON dm_mig.index_handle = dm_mid.index_handle
+WHERE dm_mid.database_ID = DB_ID()
+ORDER BY Avg_Estimated_Impact DESC
+GO
+
+--------------------------------------------------------------------------------------------------------------------
+
+-- Un Used Indexes
+
+-- Unused Index Script
+-- Original Author: Pinal Dave 
+SELECT TOP 25
+o.name AS ObjectName
+, i.name AS IndexName
+, i.index_id AS IndexID
+, dm_ius.user_seeks AS UserSeek
+, dm_ius.user_scans AS UserScans
+, dm_ius.user_lookups AS UserLookups
+, dm_ius.user_updates AS UserUpdates
+, p.TableRows
+, 'DROP INDEX ' + QUOTENAME(i.name)
++ ' ON ' + QUOTENAME(s.name) + '.'
++ QUOTENAME(OBJECT_NAME(dm_ius.OBJECT_ID)) AS 'drop statement'
+FROM sys.dm_db_index_usage_stats dm_ius
+INNER JOIN sys.indexes i ON i.index_id = dm_ius.index_id 
+AND dm_ius.OBJECT_ID = i.OBJECT_ID
+INNER JOIN sys.objects o ON dm_ius.OBJECT_ID = o.OBJECT_ID
+INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+INNER JOIN (SELECT SUM(p.rows) TableRows, p.index_id, p.OBJECT_ID
+FROM sys.partitions p GROUP BY p.index_id, p.OBJECT_ID) p
+ON p.index_id = dm_ius.index_id AND dm_ius.OBJECT_ID = p.OBJECT_ID
+WHERE OBJECTPROPERTY(dm_ius.OBJECT_ID,'IsUserTable') = 1
+AND dm_ius.database_id = DB_ID()
+AND i.type_desc = 'nonclustered'
+AND i.is_primary_key = 0
+AND i.is_unique_constraint = 0
+ORDER BY (dm_ius.user_seeks + dm_ius.user_scans + dm_ius.user_lookups) ASC
+GO
+
+------------------------------------------------------------------------------------------------------------------
+
+SELECT DB_NAME() AS database_name
+    , class
+    , class_desc
+    , major_id
+    , minor_id
+    , grantee_principal_id
+    , grantor_principal_id
+    , databasepermissions.type
+    , permission_name
+    , STATE
+    , state_desc
+    , granteedatabaseprincipal.name AS grantee_name
+    , granteedatabaseprincipal.type_desc AS grantee_type_desc
+    , granteeserverprincipal.name AS grantee_principal_name
+    , granteeserverprincipal.type_desc AS grantee_principal_type_desc
+    , grantor.name AS grantor_name
+    , granted_on_name
+    , permissionstatement + N' TO ' + QUOTENAME(granteedatabaseprincipal.name) + CASE 
+        WHEN STATE = N'W'
+            THEN N' WITH GRANT OPTION'
+        ELSE N''
+        END AS permissionstatement
+FROM (
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(CONVERT(NVARCHAR(MAX), DB_NAME())) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS AS permissionstatement
+    FROM sys.database_permissions
+    WHERE (sys.database_permissions.class = 0)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.schemas.name) + N'.' + QUOTENAME(sys.objects.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON ' + QUOTENAME(sys.schemas.name) + N'.' + QUOTENAME(sys.objects.name) + COALESCE(N' (' + QUOTENAME(sys.columns.name) + N')', N'') AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.objects
+        ON sys.objects.object_id = sys.database_permissions.major_id
+    INNER JOIN sys.schemas
+        ON sys.schemas.schema_id = sys.objects.schema_id
+    LEFT OUTER JOIN sys.columns
+        ON sys.columns.object_id = sys.database_permissions.major_id
+            AND sys.columns.column_id = sys.database_permissions.minor_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 1)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.schemas.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON SCHEMA::' + QUOTENAME(sys.schemas.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.schemas
+        ON sys.schemas.schema_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 3)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(targetPrincipal.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON ' + targetPrincipal.type_desc + N'::' + QUOTENAME(targetPrincipal.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.database_principals AS targetPrincipal
+        ON targetPrincipal.principal_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 4)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.assemblies.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON ASSEMBLY::' + QUOTENAME(sys.assemblies.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.assemblies
+        ON sys.assemblies.assembly_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 5)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.types.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON TYPE::' + QUOTENAME(sys.types.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.types
+        ON sys.types.user_type_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 6)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.types.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON TYPE::' + QUOTENAME(sys.types.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.types
+        ON sys.types.user_type_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 6)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.xml_schema_collections.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON XML SCHEMA COLLECTION::' + QUOTENAME(sys.xml_schema_collections.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.xml_schema_collections
+        ON sys.xml_schema_collections.xml_collection_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 10)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.service_message_types.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON MESSAGE TYPE::' + QUOTENAME(sys.service_message_types.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.service_message_types
+        ON sys.service_message_types.message_type_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 15)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.service_contracts.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON CONTRACT::' + QUOTENAME(sys.service_contracts.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.service_contracts
+        ON sys.service_contracts.service_contract_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 16)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.services.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON SERVICE::' + QUOTENAME(sys.services.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.services
+        ON sys.services.service_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 17)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.remote_service_bindings.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON REMOTE SERVICE BINDING::' + QUOTENAME(sys.remote_service_bindings.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.remote_service_bindings
+        ON sys.remote_service_bindings.remote_service_binding_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 18)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.routes.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON ROUTE::' + QUOTENAME(sys.routes.name COLLATE SQL_Latin1_General_CP1_CI_AS) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.routes
+        ON sys.routes.route_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 19)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.symmetric_keys.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON ASYMMETRIC KEY::' + QUOTENAME(sys.symmetric_keys.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.symmetric_keys
+        ON sys.symmetric_keys.symmetric_key_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 24)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.certificates.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON CERTIFICATE::' + QUOTENAME(sys.certificates.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.certificates
+        ON sys.certificates.certificate_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 25)
+
+    UNION ALL
+
+    SELECT sys.database_permissions.class
+        , sys.database_permissions.class_desc
+        , sys.database_permissions.major_id
+        , sys.database_permissions.minor_id
+        , sys.database_permissions.grantee_principal_id
+        , sys.database_permissions.grantor_principal_id
+        , sys.database_permissions.type
+        , sys.database_permissions.permission_name
+        , sys.database_permissions.state
+        , sys.database_permissions.state_desc
+        , QUOTENAME(sys.asymmetric_keys.name) AS granted_on_name
+        , CASE 
+            WHEN sys.database_permissions.state = N'W'
+                THEN N'GRANT'
+            ELSE sys.database_permissions.state_desc
+            END + N' ' + sys.database_permissions.permission_name COLLATE SQL_Latin1_General_CP1_CI_AS + N' ON ASYMMETRIC KEY::' + QUOTENAME(sys.asymmetric_keys.name) AS permissionstatement
+    FROM sys.database_permissions
+    INNER JOIN sys.asymmetric_keys
+        ON sys.asymmetric_keys.asymmetric_key_id = sys.database_permissions.major_id
+    WHERE (sys.database_permissions.major_id >= 0)
+        AND (sys.database_permissions.class = 26)
+    ) AS databasepermissions
+INNER JOIN sys.database_principals AS granteedatabaseprincipal
+    ON granteedatabaseprincipal.principal_id = grantee_principal_id
+LEFT OUTER JOIN sys.server_principals AS granteeserverprincipal
+    ON granteeserverprincipal.sid = granteedatabaseprincipal.sid
+INNER JOIN sys.database_principals AS grantor
+    ON grantor.principal_id = grantor_principal_id
+ORDER BY grantee_name, granted_on_name
+
+SELECT roles.name AS role_name
+    , roles.principal_id
+    , roles.type AS role_type
+    , roles.type_desc AS role_type_desc
+    , roles.is_fixed_role AS role_is_fixed_role
+    , memberdatabaseprincipal.name AS member_name
+    , memberdatabaseprincipal.principal_id AS member_principal_id
+    , memberdatabaseprincipal.type AS member_type
+    , memberdatabaseprincipal.type_desc AS member_type_desc
+    , memberdatabaseprincipal.is_fixed_role AS member_is_fixed_role
+    , memberserverprincipal.name AS member_principal_name
+    , memberserverprincipal.type_desc member_principal_type_desc
+    , N'ALTER ROLE ' + QUOTENAME(roles.name) + N' ADD MEMBER ' + QUOTENAME(memberdatabaseprincipal.name) AS AddRoleMembersStatement
+FROM sys.database_principals AS roles
+INNER JOIN sys.database_role_members
+    ON sys.database_role_members.role_principal_id = roles.principal_id
+INNER JOIN sys.database_principals AS memberdatabaseprincipal
+    ON memberdatabaseprincipal.principal_id = sys.database_role_members.member_principal_id
+LEFT OUTER JOIN sys.server_principals AS memberserverprincipal
+    ON memberserverprincipal.sid = memberdatabaseprincipal.sid
+ORDER BY role_name
+    , member_name
+	
+------------------------------------------------------------------------------------------------------------------------------------------------
